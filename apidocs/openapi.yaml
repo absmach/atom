@@ -482,6 +482,11 @@ paths:
       tags: [Authentication]
       operationId: oauthCallback
       summary: Complete an OAuth or OIDC provider callback
+      description: >-
+        An existing unverified account returns error_code=email_verification_required.
+        A browser-bound flow also returns client_state and an opaque, single-use
+        verification_code. Redeem that code at /auth/oauth/verification to identify
+        the account without logging it in. The redirect exposes no email or entity ID.
       parameters:
         - $ref: "#/components/parameters/OauthProvider"
         - name: code
@@ -567,6 +572,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthLoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/oauth/verification:
+    post:
+      tags: [Authentication]
+      operationId: oauthVerification
+      summary: Redeem a browser-bound OAuth verification outcome without creating a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthVerificationRequest"
+      responses:
+        "200":
+          description: Provider-confirmed account requiring email verification; no login token or session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthVerificationResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "408":
@@ -2109,6 +2145,22 @@ components:
         access_token_expires_at: { type: string, format: date-time }
         refresh_token: { type: string }
         refresh_token_expires_at: { type: string, format: date-time }
+
+    OAuthVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [code, client_state]
+      properties:
+        code: { type: string }
+        client_state: { type: string, minLength: 1, maxLength: 256 }
+
+    OAuthVerificationResponse:
+      type: object
+      additionalProperties: false
+      required: [entity_id, email]
+      properties:
+        entity_id: { type: string, format: uuid }
+        email: { type: string, format: email }
 
     NativeEnrollmentRequest:
       type: object

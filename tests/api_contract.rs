@@ -11,7 +11,7 @@ use atom::{
         SystemStatus,
     },
     keys::{ActiveKeys, LoadedKey},
-    models::session::{LoginResponse, OAuthLoginResponse},
+    models::session::{LoginResponse, OAuthLoginResponse, OAuthVerificationResponse},
     rate_limit::{RateLimitCategory, RateLimitPolicyStatus, RateLimitStatus},
     state::AppState,
 };
@@ -44,6 +44,37 @@ fn contract_openapi_inventory_matches_explicitly_mounted_application_methods() {
         mounted_operations(),
         "apidocs/openapi.yaml must describe every explicitly mounted application method on the primary and enrollment HTTP routers"
     );
+}
+
+#[test]
+fn contract_oauth_verification_response_carries_no_session() {
+    let response = OAuthVerificationResponse {
+        entity_id: Uuid::new_v4(),
+        email: "builder@example.test".into(),
+    };
+    assert_runtime_value_matches_component(
+        &openapi_document(),
+        "OAuthVerificationResponse",
+        &response,
+        true,
+    );
+    let json = serde_json::to_value(response).expect("verification response");
+    assert_eq!(json.as_object().expect("object").len(), 2);
+}
+
+#[tokio::test]
+async fn contract_oauth_verification_requires_browser_binding_and_sets_no_cookie() {
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(
+            Request::post("/auth/oauth/verification")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"untrusted-code"}"#))
+                .expect("verification request"),
+        )
+        .await
+        .expect("verification response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
 }
 
 #[tokio::test]

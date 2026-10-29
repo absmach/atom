@@ -309,6 +309,15 @@ pub async fn oauth_exchange(
     Ok(Json(resp))
 }
 
+pub async fn oauth_verification(
+    State(state): State<AppState>,
+    Json(req): Json<OAuthExchangeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let result =
+        service::oauth_verification(state.pool(), &req.code, req.client_state.as_deref()).await?;
+    Ok(Json(result))
+}
+
 pub async fn logout(
     State(state): State<AppState>,
     auth: AuthContext,

@@ -30,7 +30,8 @@ use crate::{
         refresh_token::TokenPairResponse,
         session::{
             EmailChangeConfirmRequest, EmailChangeRequest, LoginResponse, OAuthLoginResponse,
-            PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest, SignupResponse,
+            OAuthVerificationResponse, PasswordResetConfirmRequest, PasswordResetRequest,
+            SignupRequest, SignupResponse,
         },
         token::{CreateSharedKey, SharedKeyResponse},
     },
@@ -1279,10 +1280,25 @@ async fn oauth_callback_inner(
     let entity_id =
         match upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await? {
             OAuthIdentityOutcome::Linked(entity_id) => entity_id,
-            OAuthIdentityOutcome::EmailVerificationRequired => {
+            OAuthIdentityOutcome::EmailVerificationRequired(entity_id) => {
+                let verification_code = match state_row.client_state.as_deref() {
+                    Some(binding) => Some(
+                        create_exchange_code_with_prefix(
+                            pool,
+                            entity_id,
+                            cfg.auth_exchange_code_expiry_secs,
+                            Some(binding),
+                            Some(&email),
+                            "atomv",
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
                 return Ok(redirect_for_oauth_verification(
                     cfg,
                     state_row.client_state.as_deref(),
+                    verification_code.as_deref(),
                 ));
             }
         };
@@ -1395,7 +1411,48 @@ pub async fn oauth_exchange(
     code: &str,
     client_state: Option<&str>,
 ) -> Result<OAuthLoginResponse, AppError> {
-    let (code_id, code_secret) = parse_secret_token(code, "atomx")
+    let row = consume_oauth_code(pool, code, client_state, "atomx").await?;
+    let entity_id = row.entity_id;
+    let login = create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await?;
+    // The callback that minted this code has just refreshed the identity it
+    // signed in with, so the most recently refreshed one is that identity.
+    let picture = storage::latest_oauth_picture(pool, entity_id)
+        .await
+        .map_err(db_err)?;
+    Ok(OAuthLoginResponse {
+        login,
+        email: row.email,
+        picture,
+    })
+}
+
+/// A single-use provider result for a relying application's registration
+/// checks. It grants no session, verifies no email and links no provider.
+pub async fn oauth_verification(
+    pool: &Database,
+    code: &str,
+    client_state: Option<&str>,
+) -> Result<OAuthVerificationResponse, AppError> {
+    if client_state.is_none_or(str::is_empty) {
+        return Err(AppError::bad_request("invalid exchange binding"));
+    }
+    let row = consume_oauth_code(pool, code, client_state, "atomv").await?;
+    let email = row
+        .email
+        .ok_or_else(|| AppError::bad_request("invalid exchange code"))?;
+    Ok(OAuthVerificationResponse {
+        entity_id: row.entity_id,
+        email,
+    })
+}
+
+async fn consume_oauth_code(
+    pool: &Database,
+    code: &str,
+    client_state: Option<&str>,
+    prefix: &str,
+) -> Result<storage::ExchangeCode, AppError> {
+    let (code_id, code_secret) = parse_secret_token(code, prefix)
         .ok_or_else(|| AppError::bad_request("invalid exchange code"))?;
     let row = storage::exchange_code(pool, code_id)
         .await
@@ -1407,13 +1464,12 @@ pub async fn oauth_exchange(
     if row.client_state.as_deref() != client_state {
         return Err(AppError::bad_request("invalid exchange binding"));
     }
-    let email = row.email;
-    let hash: String = row.secret_hash;
-    let expires_at: DateTime<Utc> = row.expires_at;
-    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
-    if consumed_at.is_some()
-        || expires_at < Utc::now()
-        || !verify_secret(code_secret.as_bytes(), &hash)
+    if row.consumed_at.is_some()
+        || row.expires_at < Utc::now()
+        || !verify_secret(
+            oauth_code_secret(prefix, &code_secret).as_bytes(),
+            &row.secret_hash,
+        )
     {
         return Err(AppError::bad_request("invalid exchange code"));
     }
@@ -1424,18 +1480,7 @@ pub async fn oauth_exchange(
     if updated == 0 {
         return Err(AppError::bad_request("invalid exchange code"));
     }
-    let entity_id: Uuid = row.entity_id;
-    let login = create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await?;
-    // The callback that minted this code has just refreshed the identity it
-    // signed in with, so the most recently refreshed one is that identity.
-    let picture = storage::latest_oauth_picture(pool, entity_id)
-        .await
-        .map_err(db_err)?;
-    Ok(OAuthLoginResponse {
-        login,
-        email,
-        picture,
-    })
+    Ok(row)
 }
 
 pub async fn refresh_session(
@@ -2303,7 +2348,7 @@ async fn consume_oauth_state(
 #[derive(Debug, PartialEq, Eq)]
 enum OAuthIdentityOutcome {
     Linked(Uuid),
-    EmailVerificationRequired,
+    EmailVerificationRequired(Uuid),
 }
 
 async fn upsert_oauth_identity(
@@ -2349,7 +2394,9 @@ async fn upsert_oauth_identity(
         Some(row) => {
             let verified_at: Option<DateTime<Utc>> = row.verified_at;
             if verified_at.is_none() {
-                return Ok(OAuthIdentityOutcome::EmailVerificationRequired);
+                return Ok(OAuthIdentityOutcome::EmailVerificationRequired(
+                    row.entity_id,
+                ));
             }
             let entity_id = row.entity_id;
             if super::repo::lock_active_entity(&mut tx, entity_id)
@@ -2399,8 +2446,29 @@ async fn create_exchange_code(
     client_state: Option<&str>,
     email: Option<&str>,
 ) -> Result<String, AppError> {
-    let (code_id, code_secret, code) = new_secret_token("atomx");
-    let code_hash = hash_secret(code_secret.as_bytes())?;
+    create_exchange_code_with_prefix(pool, entity_id, expiry_secs, client_state, email, "atomx")
+        .await
+}
+
+// Bind the purpose into the hashed secret, not just the editable token prefix:
+// changing an `atomv` prefix to `atomx` must never turn recovery into login.
+fn oauth_code_secret(prefix: &str, secret: &str) -> String {
+    match prefix {
+        "atomv" => format!("oauth-email-verification:{secret}"),
+        _ => secret.to_owned(),
+    }
+}
+
+async fn create_exchange_code_with_prefix(
+    pool: &Database,
+    entity_id: Uuid,
+    expiry_secs: u64,
+    client_state: Option<&str>,
+    email: Option<&str>,
+    prefix: &str,
+) -> Result<String, AppError> {
+    let (code_id, code_secret, code) = new_secret_token(prefix);
+    let code_hash = hash_secret(oauth_code_secret(prefix, &code_secret).as_bytes())?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
@@ -2501,7 +2569,11 @@ fn redirect_with_error(cfg: &Config, error: &str) -> String {
     url_with_params(&cfg.oauth_error_redirect, &[("error", error)])
 }
 
-fn redirect_for_oauth_verification(cfg: &Config, client_state: Option<&str>) -> String {
+fn redirect_for_oauth_verification(
+    cfg: &Config,
+    client_state: Option<&str>,
+    verification_code: Option<&str>,
+) -> String {
     // This is an actionable outcome only after provider authentication. Return
     // no identity information, and let the client bind it to its browser flow.
     let mut params = vec![
@@ -2513,6 +2585,9 @@ fn redirect_for_oauth_verification(cfg: &Config, client_state: Option<&str>) -> 
     ];
     if let Some(state) = client_state {
         params.push(("client_state", state));
+    }
+    if let Some(code) = verification_code {
+        params.push(("verification_code", code));
     }
     url_with_params(&cfg.oauth_error_redirect, &params)
 }
@@ -3300,6 +3375,7 @@ mod tests {
         let url = Url::parse(&redirect_for_oauth_verification(
             &cfg,
             Some("browser&state"),
+            Some("atomv_opaque-code"),
         ))
         .expect("redirect URL");
         assert_eq!(url.host_str(), Some("builder.example.test"));
@@ -3307,7 +3383,10 @@ mod tests {
         let params = url
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(params.len(), 3);
+        assert_eq!(params.len(), 4);
+        assert_eq!(params["verification_code"], "atomv_opaque-code");
+        assert!(!params.contains_key("email"));
+        assert!(!params.contains_key("entity_id"));
         assert_eq!(params["error_code"], "email_verification_required");
         assert_eq!(params["client_state"], "browser&state");
         assert_eq!(
@@ -3319,7 +3398,8 @@ mod tests {
     #[test]
     fn oauth_verification_redirect_supports_clients_without_browser_binding() {
         let cfg = Config::for_tests();
-        let url = Url::parse(&redirect_for_oauth_verification(&cfg, None)).expect("redirect URL");
+        let url =
+            Url::parse(&redirect_for_oauth_verification(&cfg, None, None)).expect("redirect URL");
         let params = url
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
@@ -3367,7 +3447,7 @@ mod tests {
         .await;
         assert_eq!(
             result.expect("verification outcome"),
-            OAuthIdentityOutcome::EmailVerificationRequired
+            OAuthIdentityOutcome::EmailVerificationRequired(entity_id)
         );
         let links: i64 = crate::test_db::query_scalar(
             "SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1",
@@ -3396,6 +3476,110 @@ mod tests {
         .await
         .expect("count exchange codes");
         assert_eq!(codes, 0);
+
+        let cfg = Config::for_tests();
+        let (kid, public_key_pem, private_key_pem) = crate::keys::generate_key_pair().expect("key");
+        let key = LoadedKey {
+            kid,
+            public_key_pem,
+            private_key_pem,
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        let recovery = create_exchange_code_with_prefix(
+            &pool,
+            entity_id,
+            600,
+            Some("browser"),
+            Some(&email),
+            "atomv",
+        )
+        .await
+        .expect("recovery code");
+        assert!(oauth_verification(&pool, &recovery, None).await.is_err());
+        assert!(oauth_verification(&pool, &recovery, Some("other-browser"))
+            .await
+            .is_err());
+        assert!(
+            oauth_exchange(&pool, &cfg, &key, &recovery, Some("browser"))
+                .await
+                .is_err()
+        );
+        let disguised_login = recovery.replacen("atomv_", "atomx_", 1);
+        assert!(
+            oauth_exchange(&pool, &cfg, &key, &disguised_login, Some("browser"))
+                .await
+                .is_err()
+        );
+        let response = oauth_verification(&pool, &recovery, Some("browser"))
+            .await
+            .expect("bound recovery");
+        assert_eq!(response.entity_id, entity_id);
+        assert_eq!(response.email, email);
+        let response = serde_json::to_value(response).expect("recovery JSON");
+        assert_eq!(response.as_object().expect("object").len(), 2);
+        assert!(response.get("token").is_none());
+        assert!(response.get("session_id").is_none());
+        assert!(oauth_verification(&pool, &recovery, Some("browser"))
+            .await
+            .is_err());
+        let sessions: i64 = crate::test_db::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE entity_id = $1",
+            "SELECT COUNT(*) FROM sessions WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("no recovery session");
+        assert_eq!(sessions, 0);
+        let verified: bool = crate::test_db::query_scalar(
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("recovery does not verify email");
+        assert!(!verified);
+
+        let expiring = create_exchange_code_with_prefix(
+            &pool,
+            entity_id,
+            600,
+            Some("browser"),
+            Some(&email),
+            "atomv",
+        )
+        .await
+        .expect("expiring recovery");
+        let (id, _) = parse_secret_token(&expiring, "atomv").expect("format");
+        crate::test_db::query(
+            "UPDATE auth_exchange_codes SET expires_at = $2 WHERE id = $1",
+            "UPDATE auth_exchange_codes SET expires_at = $2 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(Utc::now() - Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .expect("expire");
+        assert!(oauth_verification(&pool, &expiring, Some("browser"))
+            .await
+            .is_err());
+        let raced = create_exchange_code_with_prefix(
+            &pool,
+            entity_id,
+            600,
+            Some("browser"),
+            Some(&email),
+            "atomv",
+        )
+        .await
+        .expect("raced recovery");
+        let (first, second) = tokio::join!(
+            oauth_verification(&pool, &raced, Some("browser")),
+            oauth_verification(&pool, &raced, Some("browser")),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
 
         crate::test_db::query(
             "UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1",
@@ -3458,6 +3642,12 @@ mod tests {
             .is_err());
         assert!(
             oauth_exchange(&pool, &cfg, &key, &code, Some("other-browser"))
+                .await
+                .is_err()
+        );
+        let disguised_recovery = code.replacen("atomx_", "atomv_", 1);
+        assert!(
+            oauth_verification(&pool, &disguised_recovery, Some("browser"))
                 .await
                 .is_err()
         );

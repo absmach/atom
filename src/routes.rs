@@ -147,6 +147,10 @@ pub fn create_router(state: AppState) -> Router {
             post(identity::oauth_exchange).layer(DefaultBodyLimit::max(auth_body_limit)),
         )
         .route(
+            "/auth/oauth/verification",
+            post(identity::oauth_verification).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
+        .route(
             "/auth/logout",
             post(identity::logout).layer(DefaultBodyLimit::max(auth_body_limit)),
         )
