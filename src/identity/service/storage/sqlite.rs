@@ -239,7 +239,16 @@ pub(super) async fn insert_password_reset_token(
     token_hash: String,
     expires_at: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
+    // A new request supersedes the links still outstanding for the entity, so
+    // only the newest emailed link can reset the password.
+    let mut tx = pool.begin().await?;
     sqlx::query(
+        r#"UPDATE password_reset_tokens SET consumed_at = now() WHERE entity_id = $1 AND consumed_at IS NULL"#,
+    )
+    .bind(entity_id)
+    .execute(&mut *tx)
+    .await?;
+    let inserted = sqlx::query(
         r#"INSERT INTO password_reset_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, $5)"#,
@@ -249,9 +258,11 @@ pub(super) async fn insert_password_reset_token(
     .bind(email_id)
     .bind(token_hash)
     .bind(expires_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
-    .map(|r| r.rows_affected())
+    .map(|r| r.rows_affected())?;
+    tx.commit().await?;
+    Ok(inserted)
 }
 
 pub(super) async fn password_reset_token(
