@@ -176,6 +176,20 @@ type ApiEndpointList {
 	total: Int!
 }
 
+"""
+How `orderAttribute` values are compared.
+"""
+enum AttributeValueType {
+	"""
+	Compare the attribute as text.
+	"""
+	TEXT
+	"""
+	Compare numerically; non-numeric and missing values sort last.
+	"""
+	NUMBER
+}
+
 type AuditLog {
 	id: ID!
 	actorEntityId: ID
@@ -1127,7 +1141,19 @@ type QueryRoot {
 	entity(id: ID!): Entity!
 	entities(id: String, q: String, kind: EntityKind, externalId: String, profileId: ID, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, status: EntityStatus, deleted: DeletedFilter, order: EntityOrderField, dir: SortDir, limit: Int, offset: Int): EntityList!
 	resourceKinds(tenantId: ID): [String!]!
-	resources(q: String, kind: String, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, deleted: DeletedFilter, order: ResourceOrderField, dir: SortDir, limit: Int, offset: Int): ResourceList!
+	"""
+	List resources the caller can read.
+	
+	`attributesIn` matches resources whose top-level attribute equals any of
+	the listed values: an object mapping a key to a non-empty array of
+	scalars (any of within a key, all keys must match), ANDed with the other
+	filters. `orderAttribute` sorts by one top-level attribute instead of
+	`order`, compared as `orderAttributeType` (TEXT by default); resources
+	without a usable value sort last in both directions and ties break by
+	creation time, newest first. TEXT ordering is defined for string
+	attributes; other JSON types compare by backend-specific rendering.
+	"""
+	resources(q: String, kind: String, tenantId: ID, attributesContains: JSON, attributesIn: JSON, parentGroupId: ID, includeDescendants: Boolean, deleted: DeletedFilter, order: ResourceOrderField, orderAttribute: String, orderAttributeType: AttributeValueType, dir: SortDir, limit: Int, offset: Int): ResourceList!
 	resource(id: ID!): Resource!
 	apiEndpoints(tenantId: ID, status: String, limit: Int, offset: Int): ApiEndpointList!
 	apiEndpoint(id: ID!): ApiEndpoint!

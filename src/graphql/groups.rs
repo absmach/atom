@@ -300,6 +300,7 @@ async fn authorized_group_list(
             resource_order: Default::default(),
             group_order: order,
             dir,
+            resource_attrs: Default::default(),
         },
     )
     .await

@@ -872,6 +872,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             offset: 0,
             order: Default::default(),
             dir: Default::default(),
+            attrs: Default::default(),
         },
     )
     .await
@@ -894,6 +895,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             offset: 0,
             order: Default::default(),
             dir: Default::default(),
+            attrs: Default::default(),
         },
     )
     .await
@@ -1829,6 +1831,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 resource_order: Default::default(),
                 group_order: Default::default(),
                 dir: Default::default(),
+                resource_attrs: Default::default(),
             },
             None,
         )
@@ -1927,6 +1930,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 resource_order: Default::default(),
                 group_order: Default::default(),
                 dir: Default::default(),
+                resource_attrs: Default::default(),
             },
             None,
         )

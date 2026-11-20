@@ -272,6 +272,7 @@ async fn authorized(
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -445,6 +446,7 @@ async fn multi_group_membership_does_not_duplicate_listings_or_inflate_total() {
                 resource_order: Default::default(),
                 group_order: Default::default(),
                 dir: Default::default(),
+                resource_attrs: Default::default(),
             },
             None,
         )

@@ -323,6 +323,7 @@ async fn authorized(
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -421,6 +422,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -488,6 +490,7 @@ async fn list_resources_attributes_contains_filters_items_and_total() {
             offset: 0,
             order: Default::default(),
             dir: Default::default(),
+            attrs: Default::default(),
         },
     )
     .await
@@ -560,6 +563,7 @@ async fn authorized_resource_attributes_contains_filters_before_limit_and_author
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -1027,6 +1031,7 @@ async fn authorized_groups(
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -1304,6 +1309,7 @@ async fn whitespace_empty_conditions_preserve_grant_and_ceiling_visibility() {
         resource_order: Default::default(),
         group_order: Default::default(),
         dir: Default::default(),
+        resource_attrs: Default::default(),
     };
     for ceiling in [None, Some(credential_id)] {
         let page = atom::authz::repo::authorized_object_ids_with_ceiling(&pool, query(), ceiling)
