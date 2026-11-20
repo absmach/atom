@@ -96,6 +96,27 @@ pub enum GqlResourceOrderField {
     Kind,
 }
 
+/// How `orderAttribute` values are compared.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "AttributeValueType")]
+pub enum GqlAttributeValueType {
+    /// Compare the attribute as text.
+    #[graphql(name = "TEXT")]
+    Text,
+    /// Compare numerically; non-numeric and missing values sort last.
+    #[graphql(name = "NUMBER")]
+    Number,
+}
+
+impl From<GqlAttributeValueType> for resource_model::AttributeValueType {
+    fn from(value: GqlAttributeValueType) -> Self {
+        match value {
+            GqlAttributeValueType::Text => Self::Text,
+            GqlAttributeValueType::Number => Self::Number,
+        }
+    }
+}
+
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(name = "GroupOrderField", rename_items = "snake_case")]
 pub enum GqlGroupOrderField {

@@ -775,7 +775,21 @@ pub(super) async fn authorized_resource_rows(
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
-    let order_by = authorized_resource_order_by(params.resource_order, params.dir);
+    let attributes_in = params.resource_attrs.attributes_in().cloned();
+    let order_key = params.resource_attrs.order_attribute().map(str::to_owned);
+    let order_by = match &order_key {
+        Some(_) => crate::authz::sql::postgres::attribute_order_by(
+            "attributes",
+            "$13",
+            params.resource_attrs.order_type(),
+            params.dir,
+            "created_at",
+            "id",
+        ),
+        None => authorized_resource_order_by(params.resource_order, params.dir).to_string(),
+    };
+    let attributes_in_predicate =
+        crate::authz::sql::postgres::attributes_in_predicate("r.attributes", "$12");
 
     let select_clause = match projection {
         AuthorizedResourceProjection::Ids => format!(
@@ -811,7 +825,7 @@ pub(super) async fn authorized_resource_rows(
                ),
                candidates AS (
                    SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at, r.updated_at,
-                          r.name,
+                          r.name, r.attributes,
                           COALESCE((SELECT array_agg(grp.group_id)
                                     FROM group_resource_parents grp
                                     WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
@@ -826,6 +840,7 @@ pub(super) async fn authorized_resource_rows(
                              WHERE grp.resource_id = r.id
                                AND grp.group_id IN (SELECT id FROM target_groups)))
                      AND ($8::jsonb IS NULL OR r.attributes @> $8::jsonb)
+                     AND __ATTRIBUTES_IN__
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -842,7 +857,7 @@ pub(super) async fn authorized_resource_rows(
                    GROUP BY object_id
                ),
                authorized AS (
-                   SELECT c.id, c.sub_kind, c.created_at, c.updated_at, c.name
+                   SELECT c.id, c.sub_kind, c.created_at, c.updated_at, c.name, c.attributes
                    FROM candidates c
                    LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
@@ -886,9 +901,10 @@ pub(super) async fn authorized_resource_rows(
                )
                __SELECT__"#
         .replace("__SELECT__", &select_clause)
+        .replace("__ATTRIBUTES_IN__", &attributes_in_predicate)
         .replace("__CEILING_CTE__", &crate::authz::sql::postgres::ceiling_cte("$11"));
 
-    sqlx::query_as::<_, AuthorizedPageRow>(&sql)
+    let mut query = sqlx::query_as::<_, AuthorizedPageRow>(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -900,9 +916,11 @@ pub(super) async fn authorized_resource_rows(
         .bind(limit)
         .bind(offset)
         .bind(ceiling_credential_id)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)
+        .bind(attributes_in);
+    if let Some(key) = order_key {
+        query = query.bind(key);
+    }
+    query.fetch_all(pool).await.map_err(db_err)
 }
 
 fn authorized_entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {

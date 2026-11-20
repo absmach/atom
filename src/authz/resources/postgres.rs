@@ -91,7 +91,23 @@ pub(super) async fn list(pool: &PgPool, params: &ListResources) -> Result<Resour
         .clone()
         .filter(|attrs| !attrs.is_null());
     let deleted = params.deleted.as_str();
-    let order_by = order_by(params.order, params.dir);
+    let attributes_in = params.attrs.attributes_in().cloned();
+    let order_key = params.attrs.order_attribute().map(str::to_owned);
+    let order_by = match &order_key {
+        Some(_) => crate::authz::sql::postgres::attribute_order_by(
+            "r.attributes",
+            "$11",
+            params.attrs.order_type(),
+            params.dir,
+            "r.created_at",
+            "r.id",
+        ),
+        None => order_by(params.order, params.dir).to_string(),
+    };
+    let attributes_in_items =
+        crate::authz::sql::postgres::attributes_in_predicate("r.attributes", "$10");
+    let attributes_in_total =
+        crate::authz::sql::postgres::attributes_in_predicate("r.attributes", "$8");
 
     let items_sql = format!(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -113,13 +129,14 @@ pub(super) async fn list(pool: &PgPool, params: &ListResources) -> Result<Resour
                      WHERE grp.resource_id = r.id
                        AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($9::jsonb IS NULL OR r.attributes @> $9::jsonb)
+             AND {attributes_in_items}
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND r.deleted_at IS NULL)
                   OR ($8::text = 'deleted' AND r.deleted_at IS NOT NULL))
            ORDER BY {order_by}
            LIMIT $6 OFFSET $7"#,
     );
-    let items = sqlx::query_as::<_, Resource>(&items_sql)
+    let mut items_query = sqlx::query_as::<_, Resource>(&items_sql)
         .bind(params.kind.clone())
         .bind(params.tenant_id)
         .bind(q.clone())
@@ -129,11 +146,13 @@ pub(super) async fn list(pool: &PgPool, params: &ListResources) -> Result<Resour
         .bind(offset)
         .bind(deleted)
         .bind(attributes_contains.clone())
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
+        .bind(attributes_in.clone());
+    if let Some(key) = order_key {
+        items_query = items_query.bind(key);
+    }
+    let items = items_query.fetch_all(pool).await.map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total_sql = format!(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT $4::uuid WHERE $4::uuid IS NOT NULL
                UNION ALL
@@ -152,20 +171,23 @@ pub(super) async fn list(pool: &PgPool, params: &ListResources) -> Result<Resour
                      WHERE grp.resource_id = r.id
                        AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($7::jsonb IS NULL OR r.attributes @> $7::jsonb)
+             AND {attributes_in_total}
              AND ($6::text = 'all'
                   OR ($6::text = 'live' AND r.deleted_at IS NULL)
                   OR ($6::text = 'deleted' AND r.deleted_at IS NOT NULL))"#,
-    )
-    .bind(params.kind.clone())
-    .bind(params.tenant_id)
-    .bind(q)
-    .bind(params.parent_group_id)
-    .bind(params.include_descendants)
-    .bind(deleted)
-    .bind(attributes_contains)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    );
+    let total: i64 = sqlx::query_scalar(&total_sql)
+        .bind(params.kind.clone())
+        .bind(params.tenant_id)
+        .bind(q)
+        .bind(params.parent_group_id)
+        .bind(params.include_descendants)
+        .bind(deleted)
+        .bind(attributes_contains)
+        .bind(attributes_in)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
 
     Ok(ResourceList { items, total })
 }

@@ -608,6 +608,7 @@ async fn list_by_external_id(pool: &Database, external_id: &str) -> Vec<Uuid> {
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -660,6 +661,7 @@ async fn the_external_id_filter_matches_exactly_and_scopes_to_tenant() {
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         None,
     )

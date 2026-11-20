@@ -3877,6 +3877,7 @@ pub async fn authorized_resource_kinds_with_ceiling(
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: Default::default(),
+            resource_attrs: Default::default(),
         },
         ceiling_credential_id,
         AuthorizedResourceProjection::Kinds,

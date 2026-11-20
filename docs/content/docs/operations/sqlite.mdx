@@ -147,8 +147,10 @@ aware of:
 - **Data encodings.** UUIDs are stored as 16-byte blobs, timestamps as
   fixed-width UTC text with microseconds, JSON as validated text, arrays as JSON
   text. These are internal; the API, events and exports are identical.
-- **JSON containment search** (`attributesContains`) scans instead of using a
-  GIN index. That is fine at the scales SQLite is meant for.
+- **JSON containment search** (`attributesContains`), the any-of filter
+  (`attributesIn`) and ordering by an attribute (`orderAttribute`) on resources
+  scan instead of using a GIN index. That is fine at the scales SQLite is meant
+  for. Text attribute ordering uses binary (byte) order on both backends.
 - **`TRUNCATE`** does not exist; Atom uses `DELETE`.
 - **CRL digest constraint.** PostgreSQL additionally checks that a stored CRL's
   SHA-256 column equals the digest of its DER bytes. SQLite has no built-in

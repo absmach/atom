@@ -120,6 +120,10 @@ pub struct AuthorizedObjectIdsQuery {
     pub group_order: GroupOrderField,
     #[serde(default)]
     pub dir: SortDir,
+    /// Only used when `object_kind == "resource"`: ordering by, and any-of
+    /// filtering on, values inside `attributes`.
+    #[serde(default)]
+    pub resource_attrs: super::resource::ResourceAttributeQuery,
 }
 
 #[derive(Debug, Serialize)]
