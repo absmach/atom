@@ -122,7 +122,7 @@ pub struct AuthorizedObjectIdsQuery {
     pub dir: SortDir,
     /// Only used when `object_kind == "resource"`: ordering by, and any-of
     /// filtering on, values inside `attributes`.
-    #[serde(default)]
+    #[serde(skip)]
     pub resource_attrs: super::resource::ResourceAttributeQuery,
 }
 

@@ -593,6 +593,18 @@ async fn graphql_orders_filters_and_rejects_invalid_arguments() {
         ("in empty array", json!({"t": t, "in": {"slug": []}})),
         ("in nested value", json!({"t": t, "in": {"slug": [["x"]]}})),
         ("in bad key", json!({"t": t, "in": {"sl-ug": ["x"]}})),
+        (
+            "in too many keys",
+            json!({"t": t, "in": (0..21).map(|i| (format!("k{i}"), json!(["a"]))).collect::<serde_json::Map<_, _>>()}),
+        ),
+        (
+            "in too many values",
+            json!({"t": t, "in": {"k": (0..201).collect::<Vec<i32>>()}}),
+        ),
+        (
+            "in long string",
+            json!({"t": t, "in": {"k": ["a".repeat(257)]}}),
+        ),
     ] {
         let response = schema.execute(admin(QUERY, vars)).await;
         assert_eq!(response.errors.len(), 1, "{label}: {:?}", response.errors);
@@ -628,4 +640,83 @@ async fn authorized_listing_excludes_unreadable_matches_before_ordering_and_pagi
     };
     let (labels, total) = authorized(&f, &o).await;
     assert_eq!((labels.as_slice(), total), (["g", "b"].as_slice(), 6));
+}
+
+#[tokio::test]
+#[ignore]
+async fn odd_attribute_shapes_neither_error_nor_match() {
+    let f = fixture().await;
+    let base = Utc::now();
+    let flag_true = insert_resource(
+        &f.pool,
+        f.tenant_id,
+        "flag-true",
+        json!({"flag": true, "score": 30.0}),
+        base,
+    )
+    .await;
+    insert_resource(
+        &f.pool,
+        f.tenant_id,
+        "flag-false",
+        json!({"flag": false}),
+        base,
+    )
+    .await;
+    insert_resource(&f.pool, f.tenant_id, "array-attrs", json!([1, 2]), base).await;
+    insert_resource(&f.pool, f.tenant_id, "null-attrs", Value::Null, base).await;
+
+    let direct_ids = |o: Opts| {
+        let f = &f;
+        async move {
+            atom::authz::resources::list_resources(
+                &f.pool,
+                ListResources {
+                    q: None,
+                    kind: Some("m56doc".to_string()),
+                    tenant_id: Some(f.tenant_id),
+                    attributes_contains: None,
+                    parent_group_id: None,
+                    include_descendants: false,
+                    deleted: DeletedFilter::Live,
+                    limit: 100,
+                    offset: 0,
+                    order: Default::default(),
+                    dir: o.dir,
+                    attrs: o.attrs(),
+                },
+            )
+            .await
+            .expect("direct list")
+        }
+    };
+
+    let page = direct_ids(Opts {
+        attrs_in: Some(json!({"flag": [true]})),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].id, flag_true);
+
+    // 30.0 equals 30 (JSON numeric equality) and still sorts as a number.
+    let page = direct_ids(Opts {
+        attrs_in: Some(json!({"score": [30]})),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(page.total, 3);
+
+    // Ordering over arrays, JSON null and boolean values neither errors nor
+    // loses rows: 8 fixture rows + 4 extra.
+    for ty in [AttributeValueType::Number, AttributeValueType::Text] {
+        let page = direct_ids(Opts {
+            order_attribute: Some("flag"),
+            order_type: Some(ty),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(page.total, 12);
+        assert_eq!(page.items.len(), 12);
+    }
 }

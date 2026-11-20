@@ -1150,7 +1150,8 @@ type QueryRoot {
 	filters. `orderAttribute` sorts by one top-level attribute instead of
 	`order`, compared as `orderAttributeType` (TEXT by default); resources
 	without a usable value sort last in both directions and ties break by
-	creation time, newest first.
+	creation time, newest first. TEXT ordering is defined for string
+	attributes; other JSON types compare by backend-specific rendering.
 	"""
 	resources(q: String, kind: String, tenantId: ID, attributesContains: JSON, attributesIn: JSON, parentGroupId: ID, includeDescendants: Boolean, deleted: DeletedFilter, order: ResourceOrderField, orderAttribute: String, orderAttributeType: AttributeValueType, dir: SortDir, limit: Int, offset: Int): ResourceList!
 	resource(id: ID!): Resource!

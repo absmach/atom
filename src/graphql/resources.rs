@@ -50,7 +50,8 @@ impl ResourceQuery {
     /// filters. `orderAttribute` sorts by one top-level attribute instead of
     /// `order`, compared as `orderAttributeType` (TEXT by default); resources
     /// without a usable value sort last in both directions and ties break by
-    /// creation time, newest first.
+    /// creation time, newest first. TEXT ordering is defined for string
+    /// attributes; other JSON types compare by backend-specific rendering.
     #[allow(clippy::too_many_arguments)]
     async fn resources(
         &self,

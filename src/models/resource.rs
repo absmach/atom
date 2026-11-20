@@ -68,8 +68,9 @@ pub struct ListResources {
     pub order: ResourceOrderField,
     #[serde(default)]
     pub dir: SortDir,
-    /// Ordering by, and filtering on, values inside `attributes`.
-    #[serde(default)]
+    /// Ordering by, and filtering on, values inside `attributes`. Built only
+    /// through `ResourceAttributeQuery::new`, never deserialized.
+    #[serde(skip)]
     pub attrs: ResourceAttributeQuery,
 }
 
@@ -97,13 +98,14 @@ pub enum AttributeValueType {
 const MAX_ATTRIBUTE_KEY_LEN: usize = 64;
 const MAX_ATTRIBUTES_IN_KEYS: usize = 20;
 const MAX_ATTRIBUTES_IN_VALUES: usize = 200;
+const MAX_ATTRIBUTES_IN_STRING_LEN: usize = 256;
 
 /// Validated attribute-aware listing options for resources: an optional
 /// ordering by one top-level attribute and an optional any-of filter.
 ///
 /// Built only through [`ResourceAttributeQuery::new`], so every key reaching a
 /// SQL adapter is a plain identifier. Adapters still bind keys as parameters.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResourceAttributeQuery {
     order_attribute: Option<String>,
     order_type: AttributeValueType,
@@ -166,27 +168,34 @@ impl ResourceAttributeQuery {
         let mut total = 0usize;
         for (key, values) in map {
             if !valid_attribute_key(key) {
-                return Err(AppError::bad_request(format!(
-                    "attributesIn key '{key}' must be a plain key: letters, digits and \
-                     underscores, starting with a letter or underscore, at most 64 characters"
-                )));
+                return Err(AppError::bad_request(
+                    "attributesIn keys must be plain keys: letters, digits and underscores, \
+                     starting with a letter or underscore, at most 64 characters",
+                ));
             }
             let Value::Array(values) = values else {
-                return Err(AppError::bad_request(format!(
-                    "attributesIn['{key}'] must be an array of values"
-                )));
+                return Err(AppError::bad_request(
+                    "every attributesIn value must be an array of values",
+                ));
             };
             if values.is_empty() {
-                return Err(AppError::bad_request(format!(
-                    "attributesIn['{key}'] must not be empty"
-                )));
+                return Err(AppError::bad_request(
+                    "attributesIn arrays must not be empty",
+                ));
             }
             if values
                 .iter()
                 .any(|v| matches!(v, Value::Array(_) | Value::Object(_)))
             {
+                return Err(AppError::bad_request(
+                    "attributesIn arrays may only contain strings, numbers, booleans or null",
+                ));
+            }
+            if values.iter().any(
+                |v| matches!(v, Value::String(s) if s.chars().count() > MAX_ATTRIBUTES_IN_STRING_LEN),
+            ) {
                 return Err(AppError::bad_request(format!(
-                    "attributesIn['{key}'] may only contain strings, numbers, booleans or null"
+                    "attributesIn strings may be at most {MAX_ATTRIBUTES_IN_STRING_LEN} characters"
                 )));
             }
             total += values.len();
@@ -287,6 +296,12 @@ mod tests {
         ] {
             assert!(attrs_in(bad.clone()).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn attributes_in_caps_string_length() {
+        assert!(attrs_in(json!({"k": ["a".repeat(256)]})).is_ok());
+        assert!(attrs_in(json!({"k": ["a".repeat(257)]})).is_err());
     }
 
     #[test]

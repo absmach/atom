@@ -58,7 +58,12 @@ pub(crate) fn attribute_order_by(
     format!("{expr} {dir} NULLS LAST, {created_at} DESC, {id} ASC")
 }
 
-/// JSON path selecting a validated top-level key.
+/// JSON path selecting a top-level key. The key must already be validated by
+/// `ResourceAttributeQuery::new`.
 pub(crate) fn attribute_json_path(key: &str) -> String {
+    debug_assert!(
+        !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "attribute keys are validated by ResourceAttributeQuery"
+    );
     format!("$.\"{key}\"")
 }

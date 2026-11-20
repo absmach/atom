@@ -917,7 +917,7 @@ pub(super) async fn authorized_resource_rows(
         .bind(offset)
         .bind(ceiling_credential_id)
         .bind(attributes_in);
-    if let Some(key) = order_key {
+    if let (AuthorizedResourceProjection::Ids, Some(key)) = (projection, order_key) {
         query = query.bind(key);
     }
     query.fetch_all(pool).await.map_err(db_err)
