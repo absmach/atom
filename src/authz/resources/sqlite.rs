@@ -108,7 +108,26 @@ pub(super) async fn list(
         .filter(|attrs| !attrs.is_null())
         .map(|v| v.to_string());
     let deleted = params.deleted.as_str();
-    let order_by = order_by(params.order, params.dir);
+    let attributes_in = params.attrs.attributes_in().map(|v| v.to_string());
+    let order_path = params
+        .attrs
+        .order_attribute()
+        .map(crate::authz::sql::sqlite::attribute_json_path);
+    let order_by = match &order_path {
+        Some(_) => crate::authz::sql::sqlite::attribute_order_by(
+            "r.attributes",
+            "$11",
+            params.attrs.order_type(),
+            params.dir,
+            "r.created_at",
+            "r.id",
+        ),
+        None => order_by(params.order, params.dir).to_string(),
+    };
+    let attributes_in_items =
+        crate::authz::sql::sqlite::attributes_in_predicate("r.attributes", "$10");
+    let attributes_in_total =
+        crate::authz::sql::sqlite::attributes_in_predicate("r.attributes", "$8");
 
     // `LIKE` is case-insensitive over ASCII by default in SQLite, matching
     // PostgreSQL's ILIKE closely enough for these search filters. jsonb `@>`
@@ -134,13 +153,14 @@ pub(super) async fn list(
                      WHERE grp.resource_id = r.id
                        AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($9 IS NULL OR atom_json_contains(r.attributes, $9))
+             AND {attributes_in_items}
              AND ($8 = 'all'
                   OR ($8 = 'live' AND r.deleted_at IS NULL)
                   OR ($8 = 'deleted' AND r.deleted_at IS NOT NULL))
            ORDER BY {order_by}
            LIMIT $6 OFFSET $7"#,
     );
-    let items = sqlx::query_as::<_, Resource>(&items_sql)
+    let mut items_query = sqlx::query_as::<_, Resource>(&items_sql)
         .bind(params.kind.clone())
         .bind(params.tenant_id)
         .bind(q.clone())
@@ -150,11 +170,13 @@ pub(super) async fn list(
         .bind(offset)
         .bind(deleted)
         .bind(attributes_contains.clone())
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
+        .bind(attributes_in.clone());
+    if let Some(path) = order_path {
+        items_query = items_query.bind(path);
+    }
+    let items = items_query.fetch_all(pool).await.map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar::<_, i64>(
+    let total_sql = format!(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT $4 WHERE $4 IS NOT NULL
                UNION ALL
@@ -173,20 +195,23 @@ pub(super) async fn list(
                      WHERE grp.resource_id = r.id
                        AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($7 IS NULL OR atom_json_contains(r.attributes, $7))
+             AND {attributes_in_total}
              AND ($6 = 'all'
                   OR ($6 = 'live' AND r.deleted_at IS NULL)
                   OR ($6 = 'deleted' AND r.deleted_at IS NOT NULL))"#,
-    )
-    .bind(params.kind.clone())
-    .bind(params.tenant_id)
-    .bind(q)
-    .bind(params.parent_group_id)
-    .bind(params.include_descendants)
-    .bind(deleted)
-    .bind(attributes_contains)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    );
+    let total: i64 = sqlx::query_scalar::<_, i64>(&total_sql)
+        .bind(params.kind.clone())
+        .bind(params.tenant_id)
+        .bind(q)
+        .bind(params.parent_group_id)
+        .bind(params.include_descendants)
+        .bind(deleted)
+        .bind(attributes_contains)
+        .bind(attributes_in)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
 
     Ok(ResourceList { items, total })
 }

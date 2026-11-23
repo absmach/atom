@@ -189,6 +189,7 @@ async fn direct_lists_apply_order_before_pagination() {
             offset: 0,
             order: ResourceOrderField::Name,
             dir: SortDir::Asc,
+            attrs: Default::default(),
         },
     )
     .await
@@ -290,6 +291,7 @@ async fn authorized_entity_order_survives_id_refetch_and_paginates() {
             resource_order: Default::default(),
             group_order: Default::default(),
             dir: SortDir::Desc,
+            resource_attrs: Default::default(),
         },
         None,
     )
@@ -384,6 +386,7 @@ async fn descending_nullable_sorts_put_nulls_last() {
             offset: 0,
             order: ResourceOrderField::Name,
             dir: SortDir::Desc,
+            attrs: Default::default(),
         },
     )
     .await
@@ -497,6 +500,7 @@ async fn resource_lists_sort_nulls_last_in_both_directions() {
                         offset: offset as i64,
                         order,
                         dir,
+                        attrs: Default::default(),
                     },
                 )
                 .await

@@ -9,7 +9,7 @@ use crate::{
     models::{
         access::AuthorizedObjectIdsQuery,
         enums::DeletedFilter,
-        resource::{CreateResource, ListResources, UpdateResource},
+        resource::{CreateResource, ListResources, ResourceAttributeQuery, UpdateResource},
     },
     state::AppState,
 };
@@ -18,8 +18,8 @@ use super::{
     auth::{gql_error, require_any_capability, require_auth, scope_for_tenant},
     types::{
         parse_deleted_filter, parse_id, parse_optional_id, parse_resource_order, parse_sort_dir,
-        CreateResourceInput, GqlDeletedFilter, GqlResourceOrderField, GqlSortDir, Resource,
-        ResourceList, UpdateResourceInput,
+        CreateResourceInput, GqlAttributeValueType, GqlDeletedFilter, GqlResourceOrderField,
+        GqlSortDir, Resource, ResourceList, UpdateResourceInput,
     },
 };
 
@@ -42,6 +42,15 @@ impl ResourceQuery {
             .map_err(gql_error)
     }
 
+    /// List resources the caller can read.
+    /// `attributesIn` matches resources whose top-level attribute equals any of
+    /// the listed values: an object mapping a key to a non-empty array of
+    /// scalars (any of within a key, all keys must match), ANDed with the other
+    /// filters. `orderAttribute` sorts by one top-level attribute instead of
+    /// `order`, compared as `orderAttributeType` (TEXT by default); resources
+    /// without a usable value sort last in both directions and ties break by
+    /// creation time, newest first. TEXT ordering is defined for string
+    /// attributes; other JSON types compare by backend-specific rendering.
     #[allow(clippy::too_many_arguments)]
     async fn resources(
         &self,
@@ -50,10 +59,13 @@ impl ResourceQuery {
         kind: Option<String>,
         tenant_id: Option<ID>,
         attributes_contains: Option<Value>,
+        attributes_in: Option<Value>,
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
         deleted: Option<GqlDeletedFilter>,
         order: Option<GqlResourceOrderField>,
+        order_attribute: Option<String>,
+        order_attribute_type: Option<GqlAttributeValueType>,
         dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
@@ -68,6 +80,12 @@ impl ResourceQuery {
         let limit = limit.map(i64::from).unwrap_or(20);
         let offset = offset.map(i64::from).unwrap_or(0);
         let include_descendants = include_descendants.unwrap_or(false);
+        let attrs = ResourceAttributeQuery::new(
+            order_attribute,
+            order_attribute_type.map(Into::into),
+            attributes_in,
+        )
+        .map_err(gql_error)?;
 
         if deleted != DeletedFilter::Live {
             require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
@@ -85,6 +103,7 @@ impl ResourceQuery {
                     offset,
                     order,
                     dir,
+                    attrs,
                 },
             )
             .await
@@ -126,6 +145,7 @@ impl ResourceQuery {
                 resource_order: order,
                 group_order: Default::default(),
                 dir,
+                resource_attrs: attrs,
             },
         )
         .await

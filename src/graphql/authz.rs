@@ -71,6 +71,7 @@ impl AuthzQuery {
                 resource_order: Default::default(),
                 group_order: Default::default(),
                 dir: Default::default(),
+                resource_attrs: Default::default(),
             },
         )
         .await

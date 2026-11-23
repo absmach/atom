@@ -161,6 +161,7 @@ impl EntityQuery {
                 resource_order: Default::default(),
                 group_order: Default::default(),
                 dir,
+                resource_attrs: Default::default(),
             },
         )
         .await
