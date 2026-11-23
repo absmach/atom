@@ -13,7 +13,7 @@ pub(crate) fn ceiling_cte(parameter: &str) -> String {
 /// never equal numbers). Keys come from validated identifiers and are only
 /// quoted into a JSON path, never into SQL text.
 pub(crate) fn attributes_in_predicate(attrs: &str, param: &str) -> String {
-    let path = "'$.\"' || f.key || '\"'";
+    let path = "('$.\"' || f.key || '\"')";
     format!(
         "({param} IS NULL OR NOT EXISTS (\
             SELECT 1 FROM json_each({param}) f \
@@ -22,8 +22,11 @@ pub(crate) fn attributes_in_predicate(attrs: &str, param: &str) -> String {
                 WHERE (json_type({attrs}, {path}) = v.type \
                        OR (json_type({attrs}, {path}) IN ('integer', 'real') \
                            AND v.type IN ('integer', 'real'))) \
-                  AND (v.type IN ('null', 'true', 'false') \
-                       OR json_extract({attrs}, {path}) = v.value))))"
+                  AND CASE WHEN v.type IN ('integer', 'real') \
+                      THEN atom_json_number_key({attrs} -> {path}) \
+                           = atom_json_number_key(f.value -> v.key) \
+                      ELSE (v.type IN ('null', 'true', 'false') \
+                            OR json_extract({attrs}, {path}) = v.value) END)))"
     )
 }
 
@@ -46,10 +49,7 @@ pub(crate) fn attribute_order_by(
              WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'null' THEN NULL \
              ELSE CAST(json_extract({attrs}, {path_param}) AS TEXT) END"
         ),
-        AttributeValueType::Number => format!(
-            "CASE WHEN json_type({attrs}, {path_param}) IN ('integer', 'real') \
-             THEN json_extract({attrs}, {path_param}) END"
-        ),
+        AttributeValueType::Number => format!("atom_json_number_key({attrs} -> {path_param})"),
     };
     let dir = match dir {
         SortDir::Asc => "ASC",

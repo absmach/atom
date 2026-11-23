@@ -438,6 +438,92 @@ async fn attributes_in_matches_json_equal_values() {
 
 #[tokio::test]
 #[ignore]
+async fn wide_numeric_attributes_keep_exact_filtering_order_and_pages() {
+    let mut f = fixture().await;
+    let rows = [
+        ("min", json!(i64::MIN)),
+        ("i64max", json!(i64::MAX)),
+        ("small", json!(9223372036854775808_u64)),
+        ("large", json!(9223372036854775809_u64)),
+        ("float", json!(9.223372036854776e18)),
+        ("u64max", json!(u64::MAX)),
+        ("above", json!(1.8446744073709552e19)),
+    ];
+    let base = Utc::now();
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let id = insert_resource(
+            &f.pool,
+            f.tenant_id,
+            &format!("{}-{label}", f.prefix),
+            json!({"wide": value}),
+            // Larger numbers are older, so lossy ties sort incorrectly DESC.
+            base - Duration::seconds(i as i64),
+        )
+        .await;
+        grant_read(&f.pool, f.tenant_id, f.subject_id, id).await;
+        f.ids.push((*label, id));
+    }
+
+    for (label, value) in &rows {
+        check(
+            &f,
+            Opts {
+                attrs_in: Some(json!({"wide": [value]})),
+                ..Default::default()
+            },
+            &[*label],
+            1,
+        )
+        .await;
+    }
+
+    let schema = build_schema(state(f.pool.clone()));
+    let response = schema
+        .execute(admin(
+            QUERY,
+            json!({"t": f.tenant_id.to_string(), "in": {"wide": [9223372036854775808_u64]}}),
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data["resources"]["total"], 1);
+    assert_eq!(
+        data["resources"]["items"][0]["name"],
+        format!("{}-small", f.prefix)
+    );
+
+    let values: Vec<&Value> = rows.iter().map(|(_, value)| value).collect();
+    for dir in [SortDir::Asc, SortDir::Desc] {
+        let mut expected: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+        if dir == SortDir::Desc {
+            expected.reverse();
+        }
+        let opts = Opts {
+            attrs_in: Some(json!({"wide": values})),
+            order_attribute: Some("wide"),
+            order_type: Some(AttributeValueType::Number),
+            dir,
+            ..Default::default()
+        };
+        check(&f, opts.clone(), &expected, 7).await;
+        for (page, labels) in expected.chunks(2).enumerate() {
+            check(
+                &f,
+                Opts {
+                    limit: Some(2),
+                    offset: (page * 2) as i64,
+                    ..opts.clone()
+                },
+                labels,
+                7,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn attributes_in_combines_with_contains_q_total_and_order() {
     let f = fixture().await;
     check(

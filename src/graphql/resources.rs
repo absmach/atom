@@ -43,7 +43,6 @@ impl ResourceQuery {
     }
 
     /// List resources the caller can read.
-    ///
     /// `attributesIn` matches resources whose top-level attribute equals any of
     /// the listed values: an object mapping a key to a non-empty array of
     /// scalars (any of within a key, all keys must match), ANDed with the other

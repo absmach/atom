@@ -19,6 +19,8 @@ use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+mod json_number;
+
 /// An argument as SQLite hands it to a function.
 #[derive(Debug, Clone, Copy)]
 pub enum Arg<'a> {
@@ -144,6 +146,12 @@ const FUNCTIONS: &[Spec] = &[
         args: 2,
         deterministic: true,
         func: f_json_eq,
+    },
+    Spec {
+        name: "atom_json_number_key",
+        args: 1,
+        deterministic: true,
+        func: f_json_number_key,
     },
     Spec {
         name: "atom_json_subset",
@@ -519,6 +527,13 @@ fn f_json_eq(args: &[Arg<'_>]) -> Result<Ret, String> {
     Ok(match (json_of(&args[0]), json_of(&args[1])) {
         (Some(a), Some(b)) => Ret::from(a == b),
         _ => Ret::Null,
+    })
+}
+
+fn f_json_number_key(args: &[Arg<'_>]) -> Result<Ret, String> {
+    Ok(match args[0] {
+        Arg::Text(number) => json_number::sort_key(number).map_or(Ret::Null, Ret::Blob),
+        Arg::Null | Arg::Int(_) | Arg::Real(_) | Arg::Blob(_) => Ret::Null,
     })
 }
 
